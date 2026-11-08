@@ -17,12 +17,13 @@
   */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
-#include "main.h"
-#include <math.h>
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "main.h"
+#include <stdio.h>
+#include <math.h>
+#include <stdlib.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -45,6 +46,8 @@
 
 I2C_HandleTypeDef hi2c1;
 
+UART_HandleTypeDef huart2;
+
 /* USER CODE BEGIN PV */
 	uint8_t bmp_initialized = 0;
 	uint8_t bmp_chip_id = 0;
@@ -63,6 +66,7 @@ I2C_HandleTypeDef hi2c1;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_I2C1_Init(void);
+static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -203,6 +207,51 @@ HAL_StatusTypeDef AHT20_Read(float *temperature, float *humidity)
 
     return HAL_OK;
 }
+
+void FlightSense_SendTelemetry(void)
+{
+    char uart_buffer[160];
+
+    int32_t temp = (int32_t)(temperature_c * 100.0f);
+    int32_t hum  = (int32_t)(humidity_percent * 100.0f);
+    int32_t pres = (int32_t)(pressure_hpa * 100.0f);
+    int32_t alt  = (int32_t)(altitude_m * 100.0f);
+
+    int len = snprintf(
+        uart_buffer,
+        sizeof(uart_buffer),
+        "{\"temperature\":%s%ld.%02ld,"
+        "\"humidity\":%s%ld.%02ld,"
+        "\"pressure\":%s%ld.%02ld,"
+        "\"altitude\":%s%ld.%02ld}\r\n",
+
+        temp < 0 ? "-" : "",
+        labs((long)temp) / 100,
+        labs((long)temp) % 100,
+
+        hum < 0 ? "-" : "",
+        labs((long)hum) / 100,
+        labs((long)hum) % 100,
+
+        pres < 0 ? "-" : "",
+        labs((long)pres) / 100,
+        labs((long)pres) % 100,
+
+        alt < 0 ? "-" : "",
+        labs((long)alt) / 100,
+        labs((long)alt) % 100
+    );
+
+    if (len > 0 && len < (int)sizeof(uart_buffer))
+    {
+        HAL_UART_Transmit(
+            &huart2,
+            (uint8_t *)uart_buffer,
+            (uint16_t)len,
+            100
+        );
+    }
+}
 /* USER CODE END 0 */
 
 /**
@@ -235,8 +284,9 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_I2C1_Init();
+  MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-
+  char uart_buffer[160];
   /* USER CODE END 2 */
 
   /* Initialize leds */
@@ -245,14 +295,13 @@ int main(void)
   /* Initialize USER push-button, will be used to trigger an interrupt each time it's pressed.*/
   BSP_PB_Init(BUTTON_USER, BUTTON_MODE_EXTI);
 
-
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-      /* USER CODE END WHILE */
+    /* USER CODE END WHILE */
 
-      /* USER CODE BEGIN 3 */
+    /* USER CODE BEGIN 3 */
 
       // Check AHT20
       aht_found = (
@@ -328,11 +377,13 @@ int main(void)
           BSP_LED_Toggle(LED2);
           HAL_Delay(1000);
       }
-  }
-  /* USER CODE END 3 */
+
+      FlightSense_SendTelemetry();
+
 
   }
-// End of main()
+  /* USER CODE END 3 */
+}
 
 /**
   * @brief System Clock Configuration
@@ -416,13 +467,45 @@ static void MX_I2C1_Init(void)
 }
 
 /**
+  * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART2_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART2_Init 0 */
+
+  /* USER CODE END USART2_Init 0 */
+
+  /* USER CODE BEGIN USART2_Init 1 */
+
+  /* USER CODE END USART2_Init 1 */
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 115200;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART2_Init 2 */
+
+  /* USER CODE END USART2_Init 2 */
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
   */
 static void MX_GPIO_Init(void)
 {
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
   /* USER CODE BEGIN MX_GPIO_Init_1 */
 
   /* USER CODE END MX_GPIO_Init_1 */
@@ -432,14 +515,6 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
-
-  /*Configure GPIO pins : USART_TX_Pin USART_RX_Pin */
-  GPIO_InitStruct.Pin = USART_TX_Pin|USART_RX_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-  GPIO_InitStruct.Alternate = GPIO_AF7_USART2;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
