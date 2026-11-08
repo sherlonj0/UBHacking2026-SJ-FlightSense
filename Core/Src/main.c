@@ -50,16 +50,37 @@ UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
 	uint8_t bmp_initialized = 0;
+	uint8_t mpu_initialized = 0;
+
+
+	HAL_StatusTypeDef mpu_read_status = HAL_ERROR;
+
+
 	uint8_t bmp_chip_id = 0;
 	uint8_t bmp_address = 0x76 << 1;
+
+
 	float temperature_c = 0.0f;
 	float humidity_percent = 0.0f;
 	float pressure_hpa = 0.0f;
+
 	float reference_pressure_hpa = 0.0f;
 	float altitude_m = 0.0f;
+
+	float accel_x = 0.0f;
+	float accel_y = 0.0f;
+	float accel_z = 0.0f;
+	float gyro_x = 0.0f;
+	float gyro_y = 0.0f;
+	float gyro_z = 0.0f;
+
 	uint8_t aht_data[7];
+
 	uint8_t aht_found = 0;
 	uint8_t bmp_found = 0;
+	uint8_t mpu_found = 0;
+
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -208,50 +229,145 @@ HAL_StatusTypeDef AHT20_Read(float *temperature, float *humidity)
     return HAL_OK;
 }
 
+
 void FlightSense_SendTelemetry(void)
 {
-    char uart_buffer[160];
+    char uart_buffer[320];
 
-    int32_t temp = (int32_t)(temperature_c * 100.0f);
-    int32_t hum  = (int32_t)(humidity_percent * 100.0f);
-    int32_t pres = (int32_t)(pressure_hpa * 100.0f);
-    int32_t alt  = (int32_t)(altitude_m * 100.0f);
+    // Convert floats to integers with two decimal places
+    long values[10] = {
+        (long)(temperature_c * 100.0f),
+        (long)(humidity_percent * 100.0f),
+        (long)(pressure_hpa * 100.0f),
+        (long)(altitude_m * 100.0f),
+        (long)(accel_x * 100.0f),
+        (long)(accel_y * 100.0f),
+        (long)(accel_z * 100.0f),
+        (long)(gyro_x * 100.0f),
+        (long)(gyro_y * 100.0f),
+        (long)(gyro_z * 100.0f)
+    };
 
-    int len = snprintf(
-        uart_buffer,
-        sizeof(uart_buffer),
-        "{\"temperature\":%s%ld.%02ld,"
-        "\"humidity\":%s%ld.%02ld,"
-        "\"pressure\":%s%ld.%02ld,"
-        "\"altitude\":%s%ld.%02ld}\r\n",
+    const char *names[10] = {
+        "temperature", "humidity", "pressure", "altitude",
+        "accel_x", "accel_y", "accel_z",
+        "gyro_x", "gyro_y", "gyro_z"
+    };
 
-        temp < 0 ? "-" : "",
-        labs((long)temp) / 100,
-        labs((long)temp) % 100,
+    int offset = 0;
 
-        hum < 0 ? "-" : "",
-        labs((long)hum) / 100,
-        labs((long)hum) % 100,
+    uart_buffer[offset++] = '{';
 
-        pres < 0 ? "-" : "",
-        labs((long)pres) / 100,
-        labs((long)pres) % 100,
-
-        alt < 0 ? "-" : "",
-        labs((long)alt) / 100,
-        labs((long)alt) % 100
-    );
-
-    if (len > 0 && len < (int)sizeof(uart_buffer))
+    for (int i = 0; i < 10; i++)
     {
-        HAL_UART_Transmit(
-            &huart2,
-            (uint8_t *)uart_buffer,
-            (uint16_t)len,
-            100
+        long value = values[i];
+        long magnitude = labs(value);
+
+        int written = snprintf(
+            uart_buffer + offset,
+            sizeof(uart_buffer) - (size_t)offset,
+            "\"%s\":%s%ld.%02ld%s",
+            names[i],
+            value < 0 ? "-" : "",
+            magnitude / 100,
+            magnitude % 100,
+            i < 9 ? "," : "}\r\n"
         );
+
+        if (written < 0 ||
+            written >= (int)(sizeof(uart_buffer) - (size_t)offset))
+        {
+            return;
+        }
+
+        offset += written;
     }
+
+    HAL_UART_Transmit(
+        &huart2,
+        (uint8_t *)uart_buffer,
+        (uint16_t)offset,
+        100
+    );
 }
+
+HAL_StatusTypeDef MPU6050_Init(void)
+{
+    uint8_t who_am_i = 0;
+    uint8_t wake_up = 0x00;
+
+    // Read WHO_AM_I register (0x75)
+    if (HAL_I2C_Mem_Read(
+            &hi2c1,
+            0x68 << 1,
+            0x75,
+            I2C_MEMADD_SIZE_8BIT,
+            &who_am_i,
+            1,
+            100) != HAL_OK)
+    {
+        return HAL_ERROR;
+    }
+
+    // Expected MPU6050 identity: 0x68
+    if (who_am_i != 0x68)
+    {
+        return HAL_ERROR;
+    }
+
+    // Wake up MPU6050 (disable sleep mode)
+    return HAL_I2C_Mem_Write(
+        &hi2c1,
+        0x68 << 1,
+        0x6B,
+        I2C_MEMADD_SIZE_8BIT,
+        &wake_up,
+        1,
+        100
+    );
+}
+
+HAL_StatusTypeDef MPU6050_Read(void)
+{
+       uint8_t data[14];
+
+       // Read accelerometer and gyroscope registers
+       if (HAL_I2C_Mem_Read(
+               &hi2c1,
+               0x68 << 1,
+               0x3B,
+               I2C_MEMADD_SIZE_8BIT,
+               data,
+               14,
+               100) != HAL_OK)
+       {
+           return HAL_ERROR;
+       }
+
+       // Combine high and low bytes
+       int16_t ax = (int16_t)((data[0] << 8) | data[1]);
+       int16_t ay = (int16_t)((data[2] << 8) | data[3]);
+       int16_t az = (int16_t)((data[4] << 8) | data[5]);
+
+       // Bytes 6-7 contain internal sensor temperature
+       int16_t gx = (int16_t)((data[8] << 8) | data[9]);
+       int16_t gy = (int16_t)((data[10] << 8) | data[11]);
+       int16_t gz = (int16_t)((data[12] << 8) | data[13]);
+
+
+
+       // Default accelerometer range: +/- 2g
+       accel_x = ax / 16384.0f;
+       accel_y = ay / 16384.0f;
+       accel_z = az / 16384.0f;
+
+       // Default gyroscope range: +/- 250 deg/s
+       gyro_x = gx / 131.0f;
+       gyro_y = gy / 131.0f;
+       gyro_z = gz / 131.0f;
+
+       return HAL_OK;
+   }
 /* USER CODE END 0 */
 
 /**
@@ -321,6 +437,15 @@ int main(void)
           ) == HAL_OK
       );
 
+      mpu_found = (
+          HAL_I2C_IsDeviceReady(
+              &hi2c1,
+              0x68 << 1,
+              3,
+              100
+          ) == HAL_OK
+      );
+
 
 
       if (aht_found)
@@ -377,6 +502,17 @@ int main(void)
           BSP_LED_Toggle(LED2);
           HAL_Delay(1000);
       }
+
+      if (mpu_found && !mpu_initialized)
+      {
+          mpu_initialized = (MPU6050_Init() == HAL_OK);
+      }
+
+      if (mpu_initialized)
+      {
+    	  mpu_read_status = MPU6050_Read();
+      }
+
 
       FlightSense_SendTelemetry();
 
