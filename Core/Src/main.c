@@ -45,6 +45,9 @@
 I2C_HandleTypeDef hi2c1;
 
 /* USER CODE BEGIN PV */
+	float temperature_c = 0.0f;
+	float humidity_percent = 0.0f;
+	uint8_t aht_data[7];
 	uint8_t aht_found = 0;
 	uint8_t bmp_found = 0;
 /* USER CODE END PV */
@@ -59,7 +62,39 @@ static void MX_I2C1_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+HAL_StatusTypeDef AHT20_Read(float *temperature, float *humidity)
+{
+    uint8_t trigger[3] = {0xAC, 0x33, 0x00};
+    uint8_t data[7];
 
+    if (HAL_I2C_Master_Transmit(&hi2c1, 0x38 << 1,
+                                trigger, 3, 100) != HAL_OK)
+        return HAL_ERROR;
+
+    HAL_Delay(80);
+
+    if (HAL_I2C_Master_Receive(&hi2c1, 0x38 << 1,
+                               data, 7, 100) != HAL_OK)
+        return HAL_ERROR;
+
+    if (data[0] & 0x80)
+        return HAL_BUSY;
+
+    uint32_t raw_humidity =
+        ((uint32_t)data[1] << 12) |
+        ((uint32_t)data[2] << 4) |
+        (data[3] >> 4);
+
+    uint32_t raw_temperature =
+        ((uint32_t)(data[3] & 0x0F) << 16) |
+        ((uint32_t)data[4] << 8) |
+        data[5];
+
+    *humidity = (raw_humidity * 100.0f) / 1048576.0f;
+    *temperature = (raw_temperature * 200.0f) / 1048576.0f - 50.0f;
+
+    return HAL_OK;
+}
 /* USER CODE END 0 */
 
 /**
@@ -129,11 +164,17 @@ int main(void)
           ) == HAL_OK
       );
 
+      if (aht_found)
+      {
+          AHT20_Read(&temperature_c, &humidity_percent);
+      }
+
       if (aht_found && bmp_found)
       {
           BSP_LED_Toggle(LED2);
           HAL_Delay(250);
       }
+
       else
       {
           BSP_LED_Toggle(LED2);
@@ -142,7 +183,8 @@ int main(void)
   }
   /* USER CODE END 3 */
 
-  } // End of main()
+  }
+// End of main()
 
 /**
   * @brief System Clock Configuration
