@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include <math.h>
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -45,8 +46,14 @@
 I2C_HandleTypeDef hi2c1;
 
 /* USER CODE BEGIN PV */
+	uint8_t bmp_initialized = 0;
+	uint8_t bmp_chip_id = 0;
+	uint8_t bmp_address = 0x76 << 1;
 	float temperature_c = 0.0f;
 	float humidity_percent = 0.0f;
+	float pressure_hpa = 0.0f;
+	float reference_pressure_hpa = 0.0f;
+	float altitude_m = 0.0f;
 	uint8_t aht_data[7];
 	uint8_t aht_found = 0;
 	uint8_t bmp_found = 0;
@@ -62,6 +69,107 @@ static void MX_I2C1_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+typedef struct
+{
+    uint16_t T1;
+    int16_t T2, T3;
+    uint16_t P1;
+    int16_t P2, P3, P4, P5, P6, P7, P8, P9;
+} BMP280_Calibration;
+
+BMP280_Calibration bmp_cal;
+int32_t bmp_t_fine;
+
+HAL_StatusTypeDef BMP280_Init(void)
+{
+    uint8_t calibration[24];
+    uint8_t config = 0x27;
+
+    // Read factory calibration coefficients
+    if (HAL_I2C_Mem_Read(&hi2c1, bmp_address,
+                        0x88, I2C_MEMADD_SIZE_8BIT,
+                        calibration, 24, 100) != HAL_OK)
+        return HAL_ERROR;
+
+    bmp_cal.T1 = calibration[0] | (calibration[1] << 8);
+    bmp_cal.T2 = (int16_t)(calibration[2] | (calibration[3] << 8));
+    bmp_cal.T3 = (int16_t)(calibration[4] | (calibration[5] << 8));
+
+    bmp_cal.P1 = calibration[6] | (calibration[7] << 8);
+    bmp_cal.P2 = (int16_t)(calibration[8] | (calibration[9] << 8));
+    bmp_cal.P3 = (int16_t)(calibration[10] | (calibration[11] << 8));
+    bmp_cal.P4 = (int16_t)(calibration[12] | (calibration[13] << 8));
+    bmp_cal.P5 = (int16_t)(calibration[14] | (calibration[15] << 8));
+    bmp_cal.P6 = (int16_t)(calibration[16] | (calibration[17] << 8));
+    bmp_cal.P7 = (int16_t)(calibration[18] | (calibration[19] << 8));
+    bmp_cal.P8 = (int16_t)(calibration[20] | (calibration[21] << 8));
+    bmp_cal.P9 = (int16_t)(calibration[22] | (calibration[23] << 8));
+
+    if (bmp_cal.P1 == 0)
+        return HAL_ERROR;
+
+    // Temperature x1, pressure x1, normal mode
+    return HAL_I2C_Mem_Write(&hi2c1, bmp_address,
+                            0xF4, I2C_MEMADD_SIZE_8BIT,
+                            &config, 1, 100);
+}
+
+HAL_StatusTypeDef BMP280_ReadPressure(float *pressure)
+{
+    uint8_t data[6];
+
+    if (HAL_I2C_Mem_Read(&hi2c1, bmp_address,
+                        0xF7, I2C_MEMADD_SIZE_8BIT,
+                        data, 6, 100) != HAL_OK)
+        return HAL_ERROR;
+
+    int32_t adc_P = ((uint32_t)data[0] << 12) |
+                    ((uint32_t)data[1] << 4) |
+                    (data[2] >> 4);
+
+    int32_t adc_T = ((uint32_t)data[3] << 12) |
+                    ((uint32_t)data[4] << 4) |
+                    (data[5] >> 4);
+
+    int32_t var1 = ((((adc_T >> 3) -
+                     ((int32_t)bmp_cal.T1 << 1))) *
+                     (int32_t)bmp_cal.T2) >> 11;
+
+    int32_t var2 = (((((adc_T >> 4) -
+                      (int32_t)bmp_cal.T1) *
+                     ((adc_T >> 4) -
+                      (int32_t)bmp_cal.T1)) >> 12) *
+                     (int32_t)bmp_cal.T3) >> 14;
+
+    bmp_t_fine = var1 + var2;
+
+    int64_t pvar1 = (int64_t)bmp_t_fine - 128000;
+    int64_t pvar2 = pvar1 * pvar1 * bmp_cal.P6;
+    pvar2 += (pvar1 * bmp_cal.P5) << 17;
+    pvar2 += ((int64_t)bmp_cal.P4) << 35;
+
+    pvar1 = ((pvar1 * pvar1 * bmp_cal.P3) >> 8) +
+            ((pvar1 * bmp_cal.P2) << 12);
+
+    pvar1 = (((((int64_t)1) << 47) + pvar1) *
+             bmp_cal.P1) >> 33;
+
+    if (pvar1 == 0)
+        return HAL_ERROR;
+
+    int64_t p = 1048576 - adc_P;
+    p = (((p << 31) - pvar2) * 3125) / pvar1;
+
+    pvar1 = (bmp_cal.P9 * (p >> 13) * (p >> 13)) >> 25;
+    pvar2 = (bmp_cal.P8 * p) >> 19;
+
+    p = ((p + pvar1 + pvar2) >> 8) +
+        (((int64_t)bmp_cal.P7) << 4);
+
+    *pressure = (float)p / 25600.0f;
+
+    return HAL_OK;
+}
 HAL_StatusTypeDef AHT20_Read(float *temperature, float *humidity)
 {
     uint8_t trigger[3] = {0xAC, 0x33, 0x00};
@@ -164,9 +272,50 @@ int main(void)
           ) == HAL_OK
       );
 
+
+
       if (aht_found)
       {
           AHT20_Read(&temperature_c, &humidity_percent);
+      }
+
+      if (bmp_found)
+      {
+          if (HAL_I2C_IsDeviceReady(&hi2c1, 0x76 << 1, 3, 100) == HAL_OK)
+              bmp_address = 0x76 << 1;
+          else
+              bmp_address = 0x77 << 1;
+
+          HAL_I2C_Mem_Read(&hi2c1, bmp_address,
+                           0xD0, I2C_MEMADD_SIZE_8BIT,
+                           &bmp_chip_id, 1, 100);
+      }
+
+      if (bmp_found)
+      {
+          if (!bmp_initialized)
+          {
+              bmp_initialized = (BMP280_Init() == HAL_OK);
+          }
+
+          if (bmp_initialized)
+          {
+              if (BMP280_ReadPressure(&pressure_hpa) == HAL_OK)
+              {
+                  if (reference_pressure_hpa == 0.0f)
+                  {
+                      reference_pressure_hpa = pressure_hpa;
+                  }
+
+                  altitude_m = 44330.0f *
+                      (1.0f - powf(pressure_hpa / reference_pressure_hpa,
+                                    0.1903f));
+              }
+          }
+      }
+      else
+      {
+          bmp_initialized = 0;
       }
 
       if (aht_found && bmp_found)
@@ -174,7 +323,6 @@ int main(void)
           BSP_LED_Toggle(LED2);
           HAL_Delay(250);
       }
-
       else
       {
           BSP_LED_Toggle(LED2);
